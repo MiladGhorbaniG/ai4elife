@@ -36,7 +36,7 @@ from src.LFBNet.losses.losses import LossMetric
 
 
 # function to set/configure default parameters for lfbnet.
-def get_default_config(dimension: int = 2, dropout_ratio: float = 0.5, non_linear_activation: str = 'elu',
+def get_default_config(dimension: int = 3, dropout_ratio: float = 0.5, non_linear_activation: str = 'elu',
         batch_norm: bool = True, strides: int = 1, pooling: bool = True, pool_size:int =2, default_skips: bool = True,
         kernel_size: int = 3, kernel_initializer: str = 'he_normal', use_bias: bool = False, padding: str = 'same',
         num_conv_per_block: int = 2, skip_encoder=None, use_residual: bool = True,
