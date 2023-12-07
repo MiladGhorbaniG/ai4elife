@@ -20,6 +20,7 @@ from keras.layers import Dropout
 from keras.layers import Input
 from keras.layers import concatenate, BatchNormalization, Add
 from keras.layers import MaxPooling2D, MaxPooling3D
+from keras.layers import Conv3DTranspose
 
 # locate parent directory for absolute import
 p = os.path.abspath('../..')
@@ -31,6 +32,7 @@ if p not in sys.path:
 # os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 # local import
+
 from src.LFBNet.network_architecture.get_conv_blocks import StackedConvLayerABlock, UpConvLayer
 from src.LFBNet.losses.losses import LossMetric
 
@@ -127,8 +129,10 @@ class LfbNet:
             num_conv_per_block: a series of consecutive convolution, batch normalization, activation operations.
         """
 
+        # Modify the input_image_shape for 3D
         if input_image_shape is None:
-            input_image_shape = [128, 256, 1]
+            input_image_shape = [128, 256, 32, 1]  # Adjust dimensions for 3D
+
 
         self.img_shape = input_image_shape
         self.channels_out = num_output_class
@@ -276,17 +280,21 @@ class LfbNet:
         inputs = Input(shape=self.input_image_shape, name='input_forward_encoder')
         current_stage = inputs
         # consecutive convolution, batch normalization, and activation blocks, and skipp connections until bottleneck
+        
+        
         for stage in range(self.num_layers):
             current_output_num_features = int(self.base_num_features * (2 ** stage))
             current_stage = StackedConvLayerABlock(current_stage, current_output_num_features,
-                                                   conv_config=self.conv_config, num_conv_per_block=2).conv_block()
-            # Pooling operation when the stage is before the bottleneck
+                                                   conv_config=self.conv_config, num_conv_per_block=2,
+                                                   dimension=self.conv_config["2D_3D"]).conv_block()  # Add dimension parameter
+
             if stage != (self.num_layers - 1):
-                # keep the skipp connections before the pooling operation, and the final bottleneck layer of the Encoder
                 if self.default_skips:
                     skips.append(current_stage)
-                current_stage = self.conv_config['pooling_op'](pool_size=self.conv_config['pool_size'])(current_stage)
-
+                current_stage = self.conv_config['pooling_op'](pool_size=self.conv_config['pool_size'],
+                                                               data_format='channels_last')(current_stage)  # Add data_format parameter
+                
+        
         # bottleneck layer of the Encoder, if no skip is required self.skips will have only one output, bottleneck
         skips.append(current_stage)
 
@@ -296,16 +304,18 @@ class LfbNet:
 
     """
 
+    # ...
+
     def define_forward_decoder(self):
         """ forward system's decoder model.
 
         Returns:
-            Returns forward system's decoder model. It consists a series of up sampling, concatenation layer,
+            Returns forward system's decoder model. It consists of a series of up sampling, concatenation layer,
             and convolutional blocks.
 
         """
         # direct input from encoder, bottleneck
-        inputs = Input(shape=np.asarray(self.skipped_input[0]), name="input_from_decoder")
+        inputs = Input(shape=self.img_shape, name="input_from_decoder")
         # set the two inputs from the two encoders
         inputs_forward_encoder = inputs
         inputs_feedback_encoder = Input(shape=self.latent_dim, name='input_from_feedback')
@@ -313,52 +323,47 @@ class LfbNet:
         # change the input dimension into input tensors
         skip_input = []
         for skip in range(len(self.skipped_input) - 1):
-            skip_input.append(
-                Input(shape=np.asarray(self.skipped_input[skip + 1]), name='input_from_encoder' + str(skip)))
+            skip_input.append(Input(shape=self.skipped_input[skip + 1], name=f'input_from_encoder{skip}'))
 
-        '''
-        The bottleneck need to do the feedback connection: 
-        To use U-net-based segmentation jump or comment this block 
-        '''
+        # Concatenate inputs from encoder and feedback
+        axis = -1  # or the appropriate axis for concatenation
+        concatenate_encoder_feedback = self.conv_config['merging_strategy']([inputs_forward_encoder, inputs_feedback_encoder], axis=axis)
 
-        concatenate_encoder_feedback = self.conv_config['merging_strategy'](
-            [inputs_forward_encoder, inputs_feedback_encoder])
-
+        # Apply convolutional blocks
         fused_bottle_neck = StackedConvLayerABlock(concatenate_encoder_feedback,
-                                                   int(self.base_num_features * (2 ** (self.num_layers - 1))),
-                                                   conv_config=self.conv_config, num_conv_per_block=self.conv_config[
-                'num_conv_per_block']).conv_block()
-
+                                                int(self.base_num_features * (2 ** (self.num_layers - 1))),
+                                                conv_config=self.conv_config, num_conv_per_block=self.conv_config[
+            'num_conv_per_block'], dimension=self.conv_config["2D_3D"]).conv_block()
+        
+        # Add residual connection
         fused_bottle_neck = Add()([fused_bottle_neck, inputs_forward_encoder])
-        # fused_bottle_neck = BatchNormalization()(fused_bottle_neck)
 
+        # Apply more convolutional blocks
         fused_bottle_neck = StackedConvLayerABlock(fused_bottle_neck,
-                                                   int(self.base_num_features * (2 ** self.num_layers)),
-                                                   conv_config=self.conv_config, num_conv_per_block=self.conv_config[
-                'num_conv_per_block']).conv_block()
+                                                int(self.base_num_features * (2 ** self.num_layers)),
+                                                conv_config=self.conv_config, num_conv_per_block=self.conv_config[
+            'num_conv_per_block'], dimension=self.conv_config["2D_3D"]).conv_block()
 
-        # apply drop out at the bottleneck
+        # Apply dropout at the bottleneck
         fused_bottle_neck = Dropout(self.conv_config['dropout_ratio'])(fused_bottle_neck)
 
         current_up_conv = fused_bottle_neck
 
-        for decoder_stage in range(self.num_layers - 1):
-            # decrease the number of features per block:  (self.num_decoder_stage-decoder_stage)
-            num_output_features = int(self.base_num_features * (2 ** (self.num_layers - (2 + decoder_stage))))
-            current_up_conv = UpConvLayer(current_up_conv, num_output_features=num_output_features,
-                                          conv_upsampling="2D").Up_conv_layer()
-            # Need skipp connections:
-            if self.conv_config['merging_strategy'] is not None:
-                skipped_ = skip_input[decoder_stage]
-                current_up_conv = self.conv_config['merging_strategy']([current_up_conv, skipped_])
+        # Apply additional convolutional blocks for 3D
+        fused_bottle_neck = StackedConvLayerABlock(concatenate_encoder_feedback,
+                                                int(self.base_num_features * (2 ** (self.num_layers - 1))),
+                                                conv_config=self.conv_config, num_conv_per_block=self.conv_config[
+            'num_conv_per_block'], dimension=self.conv_config["2D_3D"]).conv_block()
 
-            # convolution blocks
-            current_up_conv = StackedConvLayerABlock(current_up_conv, num_output_features, conv_config=self.conv_config,
-                                                     num_conv_per_block=self.conv_config[
-                                                         'num_conv_per_block']).conv_block()
-        """
+        # Add residual connection
+        fused_bottle_neck = Add()([fused_bottle_neck, inputs_forward_encoder])
 
-        """
+        # Apply more convolutional blocks for 3D
+        fused_bottle_neck = StackedConvLayerABlock(fused_bottle_neck,
+                                                int(self.base_num_features * (2 ** self.num_layers)),
+                                                conv_config=self.conv_config, num_conv_per_block=self.conv_config[
+            'num_conv_per_block'], dimension=self.conv_config["2D_3D"]).conv_block()
+
         # final output layer
         if self.num_classes == 1:
             activation = 'sigmoid'
@@ -368,13 +373,14 @@ class LfbNet:
             raise Exception("\n Not known output activation function \n")
 
         current_up_conv = self.conv_config['conv'](self.num_classes, kernel_size=1, activation=activation,
-                                                   kernel_initializer='he_normal', use_bias=False, padding='same',
-                                                   name='final_output_layer')(current_up_conv)
+                                                kernel_initializer='he_normal', use_bias=False, padding='same',
+                                                name='final_output_layer')(current_up_conv)
 
         skip_input.insert(0, inputs)
         skip_input.insert(1, inputs_feedback_encoder)
 
         return Model(inputs=[inputs for inputs in skip_input], outputs=[current_up_conv])
+
 
     def define_feedback_fcn_network(self):
         """ define the feedback system of the lfbnet.
@@ -383,19 +389,22 @@ class LfbNet:
             Returns the feedback system model.
 
         """
-        # No need of skipp connection for the time being
-        inputs = Input(shape=self.input_image_shape, name='input_feedback_encoder')
-        current_stage = inputs
         # Encoder part
         # consecutive convolution, batch normalization, and activation blocks,
+
+        inputs = Input(shape=self.input_image_shape, name='input_feedback_encoder')
+        current_stage = inputs
+
         for stage in range(self.num_layers):
             current_output_num_features = int(self.base_num_features * (2 ** stage))
             current_stage = StackedConvLayerABlock(current_stage, current_output_num_features,
-                                                   conv_config=self.conv_config, num_conv_per_block=2).conv_block()
-            # Pooling operation when the stage is before the bottleneck
+                                                conv_config=self.conv_config, num_conv_per_block=2,
+                                                dimension=self.conv_config["2D_3D"]).conv_block()  # Add dimension parameter
+
             if stage != (self.num_layers - 1):
-                current_stage = self.conv_config['pooling_op'](pool_size=self.conv_config['pool_size'])(current_stage)
-            else:  # bottleneck
+                current_stage = self.conv_config['pooling_op'](pool_size=self.conv_config['pool_size'],
+                                                            data_format='channels_last')(current_stage)  # Add data_format parameter
+            else:
                 current_stage = Dropout(self.conv_config['dropout_ratio'], name='latent_space_fcn')(current_stage)
 
         # Decoder part: up sampling
@@ -404,14 +413,14 @@ class LfbNet:
             # set number of features
             num_output_features = int(self.base_num_features * (2 ** (self.num_layers - (2 + decoder_stage))))
 
-            # up convolution block
-            current_up_conv = UpConvLayer(current_up_conv, num_output_features=num_output_features,
-                                          conv_upsampling="2D").Up_conv_layer()
+            # up convolution block for 3D
+            current_up_conv = Conv3DTranspose(num_output_features, kernel_size=(2, 2, 2), strides=(2, 2, 2), padding='same')(
+                current_up_conv)
 
-            # convolution blocks
+            # convolution blocks for 3D
             current_up_conv = StackedConvLayerABlock(current_up_conv, num_output_features, conv_config=self.conv_config,
-                                                     num_conv_per_block=self.conv_config[
-                                                         'num_conv_per_block']).conv_block()
+                                                    num_conv_per_block=self.conv_config['num_conv_per_block'],
+                                                    dimension=self.conv_config["2D_3D"]).conv_block()  # Add dimension parameter
 
         # final output layer
         if self.num_classes == 1:
@@ -422,14 +431,15 @@ class LfbNet:
             raise Exception("\n Not known output activation function \n")
 
         current_up_conv = self.conv_config['conv'](self.num_classes, kernel_size=1, activation=activation,
-                                                   kernel_initializer='he_normal', use_bias=False, padding='same',
-                                                   name='fcn_output_layer')(current_up_conv)
+                                                kernel_initializer='he_normal', use_bias=False, padding='same',
+                                                name='fcn_output_layer')(current_up_conv)
 
         fcn_feedback_model = Model(inputs=[inputs], outputs=[current_up_conv])
 
         fcn_feedback_model.compile(loss=self.loss_metric.dice_plus_binary_cross_entropy_loss, optimizer=self.optimizer,
-                                   metrics=[self.loss_metric.dice_metric])
+                                metrics=[self.loss_metric.dice_metric])
         return fcn_feedback_model
+
 
 
 if __name__ == '__main__':

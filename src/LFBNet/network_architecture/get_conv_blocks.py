@@ -1,26 +1,35 @@
 """ Script to get configured convolution, dropout, batch normalization and activation blocks.
 It als returns residual connected blocks.
 """
-# import libraries
 from numpy import ndarray
 from keras import backend as K
-from keras.layers import BatchNormalization, Activation, Dropout, Add, Conv2DTranspose, Conv3DTranspose
-from keras.layers import Reshape, Dense
-from keras.layers import GlobalAveragePooling2D, multiply, Permute, add, Subtract, Multiply, UpSampling2D
+from keras.layers import (
+    BatchNormalization,
+    Activation,
+    Dropout,
+    GlobalAveragePooling2D,
+    Reshape,
+    Dense,
+    multiply,
+    Permute,
+    Add,
+    Conv2DTranspose,
+)
 from copy import deepcopy
-
 
 def se_block(input_array: ndarray = None, filters: int = None, ratio: int = 8) -> ndarray:
     """ Create a squeeze-excite block. It assumes always the channel is at the end.
 
     Args:
-        input_array:  input image to apply feature selection using squeeze and excitation method.
-        filters: number of features
-        ratio:  ratio of for the squeezing
+        input_array: ndarray
+            input image to apply feature selection using squeeze and excitation method.
+        filters: int
+            number of features
+        ratio: int
+            ratio for the squeezing
 
     Returns:
-        Returns selected features with squeeze and excitation method.
-
+        ndarray: selected features with squeeze and excitation method.
     """
     init = input_array
     se_shape = (1, 1, filters)
@@ -36,50 +45,46 @@ def se_block(input_array: ndarray = None, filters: int = None, ratio: int = 8) -
     x = multiply([init, se])
     return x
 
-
 class StageConvDropoutBatchNormActivation:
-    """ Apply convolution, dropout (if set true), Batch normalization (if set true), and activation ( if set true).
+    """ Apply convolution, dropout (if set true), Batch normalization (if set true), and activation (if set true).
 
     Returns convolved output as array
 
-    ...
-    Attributes
-    ----------
-        stage_input: array
-            output_num_feautres: int
-                        number of feature space.
-
-        conv_config: dictionary
+    Attributes:
+        stage_input: ndarray
+            output_num_features: int
+                number of feature space.
+        conv_config: dict
             configuration for the convolution, batch normalization, activation functions.
-
-        skipped_input: array
+        skipped_input: ndarray
             skipped input to concatenate
-    Methods
-    -----------
-        A_forward_stage(self):
-            Returns an array of convolved, with dropout, batch normalization, and activation funcitons.
-        Residual(self):
-            residual connect by adding the shortcut and the convoluted output: x = f(x + conv_block(x))
+        output_num_features: int
+            required number of output features
+        dimension: str
+            the dimension parameter
 
+    Methods:
+        A_forward_stage() -> ndarray:
+            Apply convolution, dropout, Batch normalization, and activation to the given input.
+        residual_identity_block() -> ndarray:
+            Residual connect by adding the shortcut and the convoluted output: x = f(x + conv_block(x))
     """
-
-    def __init__(self, stage_input, output_num_features, conv_config, skipped_input=None):
+    def __init__(self, stage_input, output_num_features, conv_config, skipped_input=None, dimension=None):
         # deep copy the dictionary and mutable input parameter network_config
         self.conv_config = deepcopy(conv_config)
         self.stage_input = stage_input
-        # to conv with kernel 1x1 to have same number of channels as the predceeding layer
+        # to conv with kernel 1x1 to have the same number of channels as the preceding layer
         self.skipped_input = skipped_input
         self.output_num_features = output_num_features
         # series of conv, dropout, batch normalization, and activation operations
         self.conv_stage = []
+        self.dimension = dimension  # Add dimension parameter
 
-    def A_forward_stage(self):
-        """ Apply convolution, dropout (if set true), Batch normalization (if set true), and activation ( if set true) to
-          the given input
+    def forward_stage(self) -> ndarray:
+        """ Apply convolution, dropout, Batch normalization, and activation to the given input.
 
         Returns:
-            Returns convolved output
-
+            ndarray: convolved output
         """
         current_input = self.stage_input
         current_input = self.conv_config['conv'](self.output_num_features, kernel_size=self.conv_config['kernel_size'],
@@ -100,15 +105,12 @@ class StageConvDropoutBatchNormActivation:
 
         return current_input
 
-    def residual_identity_block(self):
-        """ residual connect by adding the shortcut and the convoluted output: x = f(x + conv_block(x))
+    def residual_identity_block(self) -> ndarray:
+        """ Residual connect by adding the shortcut and the convoluted output: x = f(x + conv_block(x))
 
-        Returns
-        -------
-        output: array,
-                returns residual connected and activated output array
+        Returns:
+            ndarray: residual connected and activated output array
         """
-
         # short_cut
         output = self.conv_config['conv'](self.output_num_features, kernel_size=1, strides=1,
                                           kernel_initializer=self.conv_config['kernel_initializer'],
@@ -122,76 +124,88 @@ class StageConvDropoutBatchNormActivation:
         return output
 
 
-class StackedConvLayerABlock:
-    """ apply series of convolutional blocks
 
-    This script apply repeated convolutions for a given number of convolutions per block.
+class StackedConvLayerABlock:
+    """
+    Apply series of convolutional blocks.
+
+    This script applies repeated convolutions for a given number of convolutions per block.
     Returns convolved, batch normalized and activated values of the input value
 
-    ...
-    Attributes
-    ----------
-        stage_input: input tensor
-        output_num_features: required number of feature channels
-        conv_config: configured series of convolutions, batch normalization, dropout, and activation functions
-        num_conv_per_block: number of repeated blocks
+    Attributes:
+        stage_input: ndarray
+        output_num_features: int
+            required number of feature channels
+        conv_config: dict
+            configured series of convolutions, batch normalization, dropout, and activation functions
+        num_conv_per_block: int
+            number of repeated blocks
+        dimension: str
+            the dimension parameter
 
-    Methods
-    -------
-    conv_block():
-        apply series of convolutional operations.
-
+    Methods:
+        conv_block() -> ndarray:
+            Apply series of convolutional operations.
     """
-
     def __init__(self, stage_input: ndarray, output_num_features: int = None, conv_config: dict = None,
-            num_conv_per_block: int = None):
+            num_conv_per_block: int = None, dimension: str = None):
         self.stage_input = stage_input
         self.output_num_features = output_num_features
         self.conv_config = deepcopy(conv_config)
         self.stage_output = []
+        self.dimension = dimension  # Add dimension parameter
 
         if num_conv_per_block is not None:
             self.conv_config['num_conv_per_block'] = num_conv_per_block
 
-    def conv_block(self):
-        """ Apply series of convolutions on the given input
+    def conv_block(self) -> ndarray:
+        """
+        Apply series of convolutions on the given input.
 
         Returns:
-            Returns convolved, batch normalized, activated output
-
+            ndarray: convolved, batch normalized, activated output
         """
         # self.stage_output.append(self.stage_input)
-        output = []
         current_output = self.stage_input
 
         if self.conv_config['use_residual']:
             temp = current_output
-            for stage in range(self.conv_config['num_conv_per_block']):
+            for _ in range(self.conv_config['num_conv_per_block']):
                 # temp = current_output
-                current_output = StageConvDropoutBatchNormActivation(stage_input=current_output,
-                                                                     output_num_features=self.output_num_features,
-                                                                     conv_config=self.conv_config).A_forward_stage()
+                current_output = StageConvDropoutBatchNormActivation(
+                    stage_input=current_output,
+                    output_num_features=self.output_num_features,
+                    conv_config=self.conv_config,
+                    dimension=self.dimension  # Pass dimension parameter
+                ).forward_stage()
                 '''
                 Residual connection after individual convolution, batch normalization, and activation functions
-                current_output = StageConvDropoutBatchNormActivation(stage_input=current_output,
-                                                                     output_num_features=self.output_num_features,
-                                                                     conv_config=self.conv_config,
-                                                                     skipped_input=temp).residual_identity_block()
+                current_output = StageConvDropoutBatchNormActivation(
+                    stage_input=current_output,
+                    output_num_features=self.output_num_features,
+                    conv_config=self.conv_config,
+                    skipped_input=temp
+                ).residual_identity_block()
                 '''
             # residual connection at the end of the num_conv_per_block*num_conv_batch_activations
-            current_output = StageConvDropoutBatchNormActivation(stage_input=current_output,
-                                                                 output_num_features=self.output_num_features,
-                                                                 conv_config=self.conv_config,
-                                                                 skipped_input=temp).residual_identity_block()
+            current_output = StageConvDropoutBatchNormActivation(
+                stage_input=current_output,
+                output_num_features=self.output_num_features,
+                conv_config=self.conv_config,
+                skipped_input=temp,
+                dimension=self.dimension  # Pass dimension parameter
+            ).residual_identity_block()
 
         # no residual connection in each CONV-BATCH-ACTIVATION BLOCKS
         else:
-            for stage in range(self.conv_config['num_conv_per_block']):
-                current_output = StageConvDropoutBatchNormActivation(stage_input=current_output,
-                                                                     output_num_features=self.output_num_features,
-                                                                     conv_config=self.conv_config).A_forward_stage()
+            for _ in range(self.conv_config['num_conv_per_block']):
+                current_output = StageConvDropoutBatchNormActivation(
+                    stage_input=current_output,
+                    output_num_features=self.output_num_features,
+                    conv_config=self.conv_config,
+                    dimension=self.dimension  # Pass dimension parameter
+                ).forward_stage()
         return current_output
-
 
 class UpConvLayer:
     """ Appy up sampling operation on the input image.
