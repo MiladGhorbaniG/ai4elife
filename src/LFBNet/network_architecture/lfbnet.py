@@ -15,12 +15,15 @@ logging.getLogger('tensorflow').disabled = True
 import tensorflow as tf
 from keras.models import Model
 from keras.layers import Conv2D
-from keras.layers import Conv3D
+from keras.layers import Conv3D,UpSampling3D
 from keras.layers import Dropout
 from keras.layers import Input
 from keras.layers import concatenate, BatchNormalization, Add
 from keras.layers import MaxPooling2D, MaxPooling3D
 from keras.layers import Conv3DTranspose
+from keras.layers import Reshape , Lambda
+from tensorflow.image import resize
+from keras import backend as K
 
 # locate parent directory for absolute import
 p = os.path.abspath('../..')
@@ -291,8 +294,8 @@ class LfbNet:
             if stage != (self.num_layers - 1):
                 if self.default_skips:
                     skips.append(current_stage)
-                current_stage = self.conv_config['pooling_op'](pool_size=self.conv_config['pool_size'],
-                                                               data_format='channels_last')(current_stage)  # Add data_format parameter
+                current_stage = self.conv_config['pooling_op'](pool_size=self.conv_config['pool_size'], data_format='channels_last')(current_stage)
+  # Add data_format parameter
                 
         
         # bottleneck layer of the Encoder, if no skip is required self.skips will have only one output, bottleneck
@@ -321,19 +324,75 @@ class LfbNet:
         inputs_feedback_encoder = Input(shape=self.latent_dim, name='input_from_feedback')
 
         # change the input dimension into input tensors
-        skip_input = []
-        for skip in range(len(self.skipped_input) - 1):
-            skip_input.append(Input(shape=self.skipped_input[skip + 1], name=f'input_from_encoder{skip}'))
+        # Reshape if needed to ensure compatibility
+        inputs_forward_encoder_reshaped = inputs_forward_encoder  # Reshape if necessary
+        pool_size = (2, 2, 2)  # Adjust the pool size as needed
+        inputs_forward_encoder_reshaped = UpSampling3D(size=pool_size)(inputs_forward_encoder_reshaped)
+
+
+        # Print statements for debugging
+        print("Shapes before concatenation:")
+        print("inputs_forward_encoder shape:", inputs_forward_encoder_reshaped.shape)
+        print("inputs_feedback_encoder shape:", inputs_feedback_encoder.shape)
+
+        # Ensure shapes are compatible for concatenation
+        if inputs_forward_encoder_reshaped.shape[1:] != inputs_feedback_encoder.shape[1:]:
+            # Assuming channel is the last dimension, adjust axis accordingly
+            inputs_forward_encoder_reshaped = UpSampling3D(size=pool_size)(inputs_forward_encoder_reshaped)
+            
+        # Make sure the channel dimensions match
+        # Define the target spatial dimensions
+        # Define the target spatial dimensions
+        
+        
+        
+        target_dimensions = (16, 32, 4)
+
+        # Reshape inputs_forward_encoder_reshaped to 4D tensor
+        inputs_forward_encoder_reshaped_4d = Reshape((512, 1024, 128))(inputs_forward_encoder_reshaped)
+
+        # Resize inputs_forward_encoder_reshaped_4d
+        inputs_forward_encoder_reshaped_resized = UpSampling3D(size=(1, 1, 1))(inputs_forward_encoder_reshaped_4d)
+
+        # Reshape it back to 5D tensor
+        inputs_forward_encoder_reshaped_resized = Reshape((-1, *target_dimensions, 1))(inputs_forward_encoder_reshaped_resized)
+
+        # Concatenate inputs_forward_encoder_reshaped_resized and inputs_feedback_encoder
+        
+        # Reshape inputs_forward_encoder_reshaped_resized to have the same shape as inputs_feedback_encoder
+        
+        # Reshape inputs_forward_encoder_reshaped_resized to have the same shape as inputs_feedback_encoder
+        # Reshape inputs_forward_encoder_reshaped_resized to have the same shape as inputs_feedback_encoder
+        size_concat_axis = K.int_shape(inputs_feedback_encoder)[-1]  # Dynamic size of the concatenation axis
+        inputs_forward_encoder_reshaped_resized = Reshape((-1, *target_dimensions, size_concat_axis))(inputs_forward_encoder_reshaped_resized)
+
+        # Add an additional dimension to inputs_feedback_encoder
+        inputs_feedback_encoder_reshaped = Reshape((1, *K.int_shape(inputs_feedback_encoder)[1:]))(inputs_feedback_encoder)
+
+        # Concatenate inputs_forward_encoder_reshaped_resized and inputs_feedback_encoder
+        concatenate_encoder_feedback = concatenate([inputs_forward_encoder_reshaped_resized, inputs_feedback_encoder_reshaped], axis=1)# Debugging print
+        print("Shapes after adjustment:")
+        print("inputs_forward_encoder_reshaped_resized shape:", inputs_forward_encoder_reshaped_resized.shape)
+        print("inputs_feedback_encoder shape:", inputs_feedback_encoder.shape)
 
         # Concatenate inputs from encoder and feedback
-        axis = -1  # or the appropriate axis for concatenation
-        concatenate_encoder_feedback = self.conv_config['merging_strategy']([inputs_forward_encoder, inputs_feedback_encoder], axis=axis)
+        # Print shapes after concatenation
+        print("Shapes after concatenation:")
+        print("concatenate_encoder_feedback shape:", concatenate_encoder_feedback.shape)
+        # Debugging print
+        print("Type of concatenate_encoder_feedback:", type(concatenate_encoder_feedback))
+        # Ensure concatenate_encoder_feedback is a tensor or array
+        print("Value of concatenate_encoder_feedback:", concatenate_encoder_feedback)
+
+        # Print statement for debugging
+        print("Shape after concatenation:", concatenate_encoder_feedback.shape)
 
         # Apply convolutional blocks
         fused_bottle_neck = StackedConvLayerABlock(concatenate_encoder_feedback,
-                                                int(self.base_num_features * (2 ** (self.num_layers - 1))),
-                                                conv_config=self.conv_config, num_conv_per_block=self.conv_config[
-            'num_conv_per_block'], dimension=self.conv_config["2D_3D"]).conv_block()
+                                                    int(self.base_num_features * (2 ** (self.num_layers - 1))),
+                                                    conv_config=self.conv_config, num_conv_per_block=self.conv_config['num_conv_per_block'],
+                                                    dimension=self.conv_config["2D_3D"]).conv_block()
+
         
         # Add residual connection
         fused_bottle_neck = Add()([fused_bottle_neck, inputs_forward_encoder])
@@ -402,8 +461,8 @@ class LfbNet:
                                                 dimension=self.conv_config["2D_3D"]).conv_block()  # Add dimension parameter
 
             if stage != (self.num_layers - 1):
-                current_stage = self.conv_config['pooling_op'](pool_size=self.conv_config['pool_size'],
-                                                            data_format='channels_last')(current_stage)  # Add data_format parameter
+                current_stage = self.conv_config['pooling_op'](pool_size=self.conv_config['pool_size'], data_format='channels_last')(current_stage)
+  # Add data_format parameter
             else:
                 current_stage = Dropout(self.conv_config['dropout_ratio'], name='latent_space_fcn')(current_stage)
 
@@ -414,8 +473,8 @@ class LfbNet:
             num_output_features = int(self.base_num_features * (2 ** (self.num_layers - (2 + decoder_stage))))
 
             # up convolution block for 3D
-            current_up_conv = Conv3DTranspose(num_output_features, kernel_size=(2, 2, 2), strides=(2, 2, 2), padding='same')(
-                current_up_conv)
+            current_up_conv = Conv3DTranspose(num_output_features, kernel_size=(3, 3, 3), strides=(2, 2, 2), padding='same')(current_up_conv)
+
 
             # convolution blocks for 3D
             current_up_conv = StackedConvLayerABlock(current_up_conv, num_output_features, conv_config=self.conv_config,
